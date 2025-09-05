@@ -13,9 +13,8 @@ import streamlit as st
 st.set_page_config(page_title="Woo fetch latest order by Name", page_icon="🧾", layout="wide")
 st.markdown(
     """
-    <div style="display:flex;align-items:center;gap:12px;">
+    <div style="display:block;align-items:center;gap:12px;">
         <img src="https://alternatehealthclub.com/wp-content/uploads/2025/08/AHC-New-V1.png" style="height:56px;image-rendering:-webkit-optimize-contrast;">
-        <br><br>
         <h2 style="margin:0;">Woo fetch latest order by Name</h2>
     </div>
     """,
