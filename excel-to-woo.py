@@ -1,11 +1,9 @@
-# 02_Woo_Fetch_Latest_Order_By_Name_indexed.py
+# 02_Woo_Fetch_Last_Order_By_Name.py
 import io
 import time
 import re
 from urllib.parse import urljoin
 from difflib import SequenceMatcher
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
 
 import requests
 import pandas as pd
@@ -24,6 +22,11 @@ st.markdown(
 )
 
 # Secrets
+# .streamlit/secrets.toml
+# [woo]
+# url = "https://yourdomain.com"
+# ck = "ck_xxx"
+# cs = "cs_xxx"
 if "woo" not in st.secrets:
     st.error("Woo secrets missing. Add [woo] url, ck, cs in .streamlit/secrets.toml")
     st.stop()
@@ -31,8 +34,6 @@ if "woo" not in st.secrets:
 BASE_URL = st.secrets["woo"]["url"].rstrip("/") + "/"
 CK = st.secrets["woo"]["ck"]
 CS = st.secrets["woo"]["cs"]
-
-SESSION = requests.Session()
 
 # --------------- Text and name utils ---------------
 def norm_text(s: str, lower=True, strip_punct=True, collapse_ws=True) -> str:
@@ -51,6 +52,7 @@ def tokens(s: str) -> list[str]:
     return [t for t in norm_text(s).split() if t]
 
 def dedupe_repeated_sequence(tok: list[str]) -> list[str]:
+    # Compress exact repeats like ["haley","mcquire","haley","mcquire"] → first half
     while len(tok) >= 2 and len(tok) % 2 == 0 and tok[: len(tok)//2] == tok[len(tok)//2 :]:
         tok = tok[: len(tok)//2]
     return tok
@@ -91,6 +93,7 @@ def contains_token(candidate_name: str, token: str | None) -> bool:
     return token in set(tokens(candidate_name))
 
 def match_class(candidate_name: str, target_full: str) -> str:
+    # both means candidate contains both first and last tokens from target
     f, l = split_first_last(target_full)
     cand = canonical_name_simple(candidate_name)
     has_f = contains_token(cand, f)
@@ -165,42 +168,32 @@ def address_accept(metrics: dict, th_jaccard: float, th_seq: float) -> bool:
         return True
     return False
 
-# --------------- Woo API ---------------
+# --------------- Woo API helpers ---------------
 def woo_get(path: str, params: dict) -> requests.Response:
     url = urljoin(BASE_URL, path)
-    resp = SESSION.get(url, params=params, auth=(CK, CS), timeout=30)
+    resp = requests.get(url, params=params, auth=(CK, CS), timeout=30)
     resp.raise_for_status()
     return resp
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_all_customers(per_page: int = 100, max_pages: int = 2000) -> list:
-    customers = []
-    for page in range(1, max_pages + 1):
-        r = woo_get("wp-json/wc/v3/customers", {
-            "per_page": per_page,
-            "page": page,
-            "orderby": "id",
-            "order": "desc",
-        })
-        arr = r.json()
-        if not arr:
-            break
-        customers.extend(arr)
-        # Stop if fewer than per_page which means last page
-        if len(arr) < per_page:
-            break
-    return customers
+def fetch_customers_by_search(q: str, per_page=100) -> list:
+    params = {
+        "search": q,
+        "per_page": per_page,
+        "orderby": "id",
+        "order": "desc",
+    }
+    r = woo_get("wp-json/wc/v3/customers", params)
+    return r.json()
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def latest_order_for_customer_cached(customer_id: int, status_csv: str | None) -> dict | None:
+def fetch_latest_order_for_customer(customer_id: int, allowed_statuses: list[str] | None = None) -> dict | None:
     params = {
         "customer": customer_id,
         "per_page": 5,
         "orderby": "date",
         "order": "desc",
     }
-    if status_csv:
-        params["status"] = status_csv
+    if allowed_statuses:
+        params["status"] = ",".join(allowed_statuses)
     r = woo_get("wp-json/wc/v3/orders", params)
     arr = r.json()
     if not arr:
@@ -210,91 +203,76 @@ def latest_order_for_customer_cached(customer_id: int, status_csv: str | None) -
     arr.sort(key=_dt, reverse=True)
     return arr[0]
 
-def status_csv(statuses):
-    if not statuses:
+def fetch_recent_orders_search(q: str, pages=3, per_page=100, allowed_statuses: list[str] | None = None) -> list:
+    results = []
+    for page in range(1, pages + 1):
+        params = {
+            "search": q,
+            "per_page": per_page,
+            "page": page,
+            "orderby": "date",
+            "order": "desc",
+        }
+        if allowed_statuses:
+            params["status"] = ",".join(allowed_statuses)
+        r = woo_get("wp-json/wc/v3/orders", params)
+        arr = r.json()
+        if not arr:
+            break
+        results.extend(arr)
+        time.sleep(0.15)
+    return results
+
+# --------------- Candidate selection with strict priority ---------------
+def pick_best_customer_with_priority(customers: list, target_full: str, threshold: float) -> dict | None:
+    # Build scored candidates
+    cands = []
+    for c in customers:
+        full = canonical_name_from_parts(c.get("first_name", ""), c.get("last_name", ""))
+        cls = match_class(full, target_full)
+        score = name_ratio(full, target_full)
+        cands.append((c, cls, score))
+
+    if not cands:
         return None
-    return ",".join(statuses)
 
-# --------------- Customer index and matching ---------------
-class CustomerIndex:
-    def __init__(self, customers: list[dict]):
-        rows = []
-        for c in customers:
-            first = c.get("first_name", "") or ""
-            last = c.get("last_name", "") or ""
-            full = canonical_name_from_parts(first, last)
-            rows.append({
-                "id": c.get("id"),
-                "first": first,
-                "last": last,
-                "full": full,
-                "first_tok": tokens(first)[0] if tokens(first) else None,
-                "last_tok": tokens(last)[-1] if tokens(last) else None,
-            })
-        self.df = pd.DataFrame(rows)
+    # Filter by class priority strictly
+    for cls_want in ("both", "last", "first"):
+        tier = [(c, s) for c, cls, s in cands if cls == cls_want and s >= threshold]
+        if tier:
+            # choose highest score within this tier
+            tier.sort(key=lambda x: x[1], reverse=True)
+            return tier[0][0]
+    return None
 
-        # Build simple dict indexes
-        self.by_full = {}
-        for _, r in self.df.iterrows():
-            self.by_full.setdefault(r["full"], []).append(int(r["id"]))
+def pick_latest_order_by_billing_name_with_priority(orders: list, target_full: str, threshold: float) -> dict | None:
+    # Build scored candidates
+    cands = []
+    for o in orders:
+        b = o.get("billing") or {}
+        full = canonical_name_from_parts(b.get("first_name", ""), b.get("last_name", ""))
+        cls = match_class(full, target_full)
+        score = name_ratio(full, target_full)
+        cands.append((o, cls, score))
 
-        self.by_last = {}
-        for _, r in self.df.iterrows():
-            if r["last_tok"]:
-                self.by_last.setdefault(r["last_tok"], []).append(int(r["id"]))
+    if not cands:
+        return None
 
-        self.by_first = {}
-        for _, r in self.df.iterrows():
-            if r["first_tok"]:
-                self.by_first.setdefault(r["first_tok"], []).append(int(r["id"]))
+    # Evaluate strictly by class priority then newest date then score
+    def dt_key(o):
+        return o.get("date_created_gmt") or o.get("date_created") or ""
 
-    def get_candidates(self, target_full: str) -> list[int]:
-        # Priority 1 exact full canonical match
-        t_full = canonical_name_simple(target_full)
-        if t_full in self.by_full:
-            return list(self.by_full[t_full])
+    for cls_want in ("both", "last", "first"):
+        tier = [(o, s) for o, cls, s in cands if cls == cls_want and s >= threshold]
+        if tier:
+            tier.sort(key=lambda x: (dt_key(x[0]), x[1]), reverse=True)
+            return tier[0][0]
+    return None
 
-        # Priority 2 match by last token
-        _, l = split_first_last(target_full)
-        if l and l in self.by_last:
-            return list(self.by_last[l])
-
-        # Priority 3 match by first token
-        f, _ = split_first_last(target_full)
-        if f and f in self.by_first:
-            return list(self.by_first[f])
-
-        return []
-
-    def best_customer(self, target_full: str, threshold: float) -> int | None:
-        cand_ids = self.get_candidates(target_full)
-        if not cand_ids:
-            return None
-
-        # Score and class priority
-        t = canonical_name_simple(target_full)
-        records = self.df[self.df["id"].isin(cand_ids)].copy()
-        if records.empty:
-            return None
-
-        def row_score(row):
-            cls = match_class(row["full"], t)
-            sc = name_ratio(row["full"], t)
-            return class_priority(cls), sc
-
-        records["cls_pri"] = records.apply(lambda r: class_priority(match_class(r["full"], t)), axis=1)
-        records["sim"] = records.apply(lambda r: name_ratio(r["full"], t), axis=1)
-        # Filter by threshold
-        records = records[records["sim"] >= threshold]
-        if records.empty:
-            return None
-        # Sort by class priority then similarity
-        records = records.sort_values(by=["cls_pri", "sim"], ascending=[False, False])
-        return int(records.iloc[0]["id"])
-
-# --------------- UI ---------------
+# --------------- UI and controls ---------------
 st.subheader("Upload Excel with Name and Address")
 uploaded = st.file_uploader("Excel file", type=["xlsx", "xls"])
+
 if uploaded is None:
     st.stop()
 
@@ -316,106 +294,42 @@ with left:
 with right:
     addr_col = st.selectbox("Address column", list(df.columns))
 
-st.subheader("Matching and speed options")
+st.subheader("Matching options")
 c1, c2, c3 = st.columns(3)
 with c1:
     name_conf_threshold = st.slider("Minimum name similarity to accept", 0.50, 0.99, 0.85, 0.01)
 with c2:
-    max_workers = st.number_input("Concurrent order fetch workers", min_value=1, max_value=24, value=8, step=1)
+    order_search_pages = st.number_input("Fallback order search pages", min_value=1, max_value=20, value=5, step=1)
 with c3:
-    use_status_filter = st.checkbox("Filter order statuses", value=True)
+    per_page_orders = st.number_input("Orders per page when searching", min_value=20, max_value=100, value=100, step=10)
 
-allowed_statuses = ["processing", "completed", "on-hold", "pending", "failed"] if use_status_filter else None
-
-c4, c5 = st.columns(2)
+c4, c5, c6 = st.columns(3)
 with c4:
-    use_order_fallback = st.checkbox("If no customer match, try order search by name", value=False)
+    addr_accept_jaccard = st.slider("Accept address if Jaccard ≥", 0.10, 1.0, 0.40, 0.05)
 with c5:
-    recent_days = st.number_input("Limit order search to last N days", min_value=7, max_value=3650, value=365, step=7)
+    addr_accept_ratio = st.slider("Accept address if Sequence ratio ≥", 0.10, 1.0, 0.60, 0.05)
+with c6:
+    pause_ms = st.number_input("Pause between API calls ms", min_value=0, max_value=2000, value=100, step=50)
 
-run = st.button("Build final sheet")
+with st.expander("Order status filter optional"):
+    use_filter = st.checkbox("Filter by allowed statuses", value=False)
+    allowed_statuses = ["processing", "completed", "on-hold", "pending", "failed"]
+    if not use_filter:
+        allowed_statuses = None
+
+run = st.button("Fetch from Woo and build final sheet")
 if not run:
     st.stop()
 
-# --------------- Build customer index once ---------------
-with st.spinner("Fetching customers and building index"):
-    all_customers = fetch_all_customers(per_page=100)
-    idx = CustomerIndex(all_customers)
-
-# --------------- Phase 1 map each row to a customer id ---------------
-name_to_customer = []
-for _, r in df.iterrows():
-    target_full = canonical_name_simple(str(r.get(name_col, "") or ""))
-    cid = idx.best_customer(target_full, name_conf_threshold)
-    name_to_customer.append(cid)
-
-# --------------- Phase 2 fetch latest orders for unique customers with concurrency ---------------
-unique_customers = sorted({cid for cid in name_to_customer if cid})
-status_str = status_csv(allowed_statuses)
-
-def fetch_latest_for_id(cid):
-    return cid, latest_order_for_customer_cached(cid, status_str)
-
-orders_map = {}
-if unique_customers:
-    with st.spinner(f"Fetching latest orders for {len(unique_customers)} customers"):
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = [ex.submit(fetch_latest_for_id, cid) for cid in unique_customers]
-            for fut in as_completed(futures):
-                cid, order = fut.result()
-                orders_map[cid] = order
-
-# Optional fallback for names without a customer match
-def fetch_recent_orders_search(q: str, pages: int, per_page: int, status_csv: str | None, after_iso: str | None) -> list:
-    results = []
-    for page in range(1, pages + 1):
-        params = {
-            "search": q,
-            "per_page": per_page,
-            "page": page,
-            "orderby": "date",
-            "order": "desc",
-        }
-        if status_csv:
-            params["status"] = status_csv
-        if after_iso:
-            params["after"] = after_iso
-        r = woo_get("wp-json/wc/v3/orders", params)
-        arr = r.json()
-        if not arr:
-            break
-        results.extend(arr)
-    return results
-
-def pick_latest_order_by_billing_name_with_priority(orders: list, target_full: str, threshold: float) -> dict | None:
-    cands = []
-    for o in orders:
-        b = o.get("billing") or {}
-        full = canonical_name_from_parts(b.get("first_name", ""), b.get("last_name", ""))
-        cls = match_class(full, target_full)
-        score = name_ratio(full, target_full)
-        cands.append((o, cls, score))
-    if not cands:
-        return None
-    def dt_key(o):
-        return o.get("date_created_gmt") or o.get("date_created") or ""
-    for cls_want in ("both", "last", "first"):
-        tier = [(o, s) for o, cls, s in cands if cls == cls_want and s >= threshold]
-        if tier:
-            tier.sort(key=lambda x: (dt_key(x[0]), x[1]), reverse=True)
-            return tier[0][0]
-    return None
-
-after_iso = (datetime.utcnow() - timedelta(days=int(recent_days))).isoformat() + "Z" if use_order_fallback else None
-
-# --------------- Phase 3 build output rows ---------------
+# --------------- Processing ---------------
 rows = []
 progress = st.progress(0)
+status = st.empty()
 n = len(df)
 
-for i, r in enumerate(df.itertuples(index=False), start=1):
-    name_raw = str(getattr(r, name_col) if hasattr(r, name_col) else "")
-    addr_raw = str(getattr(r, addr_col) if hasattr(r, addr_col) else "")
+for idx, row in df.iterrows():
+    name_raw = str(row.get(name_col, "") or "")
+    addr_raw = str(row.get(addr_col, "") or "")
     target_full = canonical_name_simple(name_raw)
 
     result = {
@@ -430,20 +344,13 @@ for i, r in enumerate(df.itertuples(index=False), start=1):
         "ZipMatch": None,
         "HouseNumMatch": None,
         "NumOverlap": None,
+        "NameSimUsed": None,
         "MatchSource": None,
         "MatchNote": None,
     }
 
-    cid = name_to_customer[i - 1]
-    order = None
-
-    if cid:
-        order = orders_map.get(cid)
-        result["MatchSource"] = "customer"
-
-    # Optional fallback by order search when no customer id found
-    if order is None and use_order_fallback and target_full:
-        # strict priority full then last then first
+    try:
+        # Build prioritized queries: full name then last token then first token
         f_tok, l_tok = split_first_last(target_full)
         queries = []
         full_q = canonical_name_simple(target_full)
@@ -454,38 +361,79 @@ for i, r in enumerate(df.itertuples(index=False), start=1):
         if f_tok:
             queries.append(("first", f_tok))
 
+        order = None
+        best_sim = 0.0
+
+        # Priority 1: search customers by queries in order and pick best class and score
+        best_customer = None
         for cls_want, q in queries:
-            orders = fetch_recent_orders_search(q, pages=2, per_page=100, status_csv=status_str, after_iso=after_iso)
-            cand = pick_latest_order_by_billing_name_with_priority(orders, target_full, name_conf_threshold)
+            customers = fetch_customers_by_search(q)
+            cand = pick_best_customer_with_priority(customers, target_full, name_conf_threshold)
             if cand:
-                order = cand
-                result["MatchSource"] = "orders"
-                break
+                full = canonical_name_from_parts(cand.get("first_name", ""), cand.get("last_name", ""))
+                sim = name_ratio(full, target_full)
+                if class_priority(match_class(full, target_full)) >= class_priority(cls_want) and sim >= name_conf_threshold:
+                    best_customer = cand
+                    best_sim = sim
+                    break
+            time.sleep(pause_ms / 1000.0)
 
-    if order:
-        billing = order.get("billing") or {}
-        shipping = order.get("shipping") or {}
-        result["OrderID"] = order.get("id")
-        result["BillingEmail"] = billing.get("email")
-        result["BillingPhone"] = billing.get("phone")
+        if best_customer:
+            order = fetch_latest_order_for_customer(best_customer["id"], allowed_statuses=allowed_statuses)
+            result["MatchSource"] = "customer"
+            result["NameSimUsed"] = round(best_sim, 3)
 
-        m = address_match_metrics(addr_raw, shipping)
-        result["WooShippingAddress"] = m["wc_joined"]
-        result["AddrJaccard"] = m["jaccard"]
-        result["AddrSeqRatio"] = m["seq_ratio"]
-        result["ZipMatch"] = m["zip_match"]
-        result["HouseNumMatch"] = m["house_num_match"]
-        result["NumOverlap"] = m["num_overlap"]
+        # Priority 2: orders search by queries if not found via customers
+        if order is None:
+            for cls_want, q in queries:
+                orders = fetch_recent_orders_search(q, pages=order_search_pages, per_page=per_page_orders, allowed_statuses=allowed_statuses)
+                cand = pick_latest_order_by_billing_name_with_priority(orders, target_full, name_conf_threshold)
+                if cand:
+                    b = cand.get("billing") or {}
+                    full = canonical_name_from_parts(b.get("first_name", ""), b.get("last_name", ""))
+                    mcls = match_class(full, target_full)
+                    sim = name_ratio(full, target_full)
+                    if class_priority(mcls) >= class_priority(cls_want) and sim >= name_conf_threshold:
+                        order = cand
+                        best_sim = sim
+                        result["MatchSource"] = "orders"
+                        result["NameSimUsed"] = round(best_sim, 3)
+                        break
+                time.sleep(pause_ms / 1000.0)
 
-        ok = address_accept(m, th_jaccard=0.40, th_seq=0.60)
-        result["MatchNote"] = "OK" if ok else "Address differs"
-    else:
-        result["MatchNote"] = "No match"
+        if order:
+            billing = order.get("billing") or {}
+            shipping = order.get("shipping") or {}
+
+            result["OrderID"] = order.get("id")
+            result["BillingEmail"] = billing.get("email")
+            result["BillingPhone"] = billing.get("phone")
+
+            m = address_match_metrics(addr_raw, shipping)
+            result["WooShippingAddress"] = m["wc_joined"]
+            result["AddrJaccard"] = m["jaccard"]
+            result["AddrSeqRatio"] = m["seq_ratio"]
+            result["ZipMatch"] = m["zip_match"]
+            result["HouseNumMatch"] = m["house_num_match"]
+            result["NumOverlap"] = m["num_overlap"]
+
+            ok = address_accept(m, addr_accept_jaccard, addr_accept_ratio)
+            result["MatchNote"] = "OK" if ok else "Address differs"
+        else:
+            result["MatchNote"] = "No match"
+
+    except requests.HTTPError as http_err:
+        result["MatchNote"] = f"HTTP {http_err.response.status_code}"
+    except Exception as e:
+        result["MatchNote"] = f"Error {type(e).__name__}"
 
     rows.append(result)
-    progress.progress(int((i / n) * 100))
+    progress.progress(int(((idx + 1) / n) * 100))
+    status.text(f"Processed {idx + 1} of {n}")
+    time.sleep(pause_ms / 1000.0)
 
 progress.progress(100)
+status.text("Done")
 
 out_df = pd.DataFrame(rows)
 
