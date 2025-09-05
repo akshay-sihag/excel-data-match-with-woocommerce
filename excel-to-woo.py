@@ -17,7 +17,7 @@ st.set_page_config(page_title="Woo fetch last order by Name", page_icon="🧾", 
 st.markdown(
     """
     <div style="display:flex;align-items:center;gap:12px;">
-        <img src="assets/logo.png" style="height:56px;image-rendering:-webkit-optimize-contrast;">
+        <img src="https://alternatehealthclub.com/wp-content/uploads/2025/08/AHC-New-V1.png" style="height:56px;image-rendering:-webkit-optimize-contrast;">
         <h2 style="margin:0;">Woo fetch last order by Name</h2>
     </div>
     """,
