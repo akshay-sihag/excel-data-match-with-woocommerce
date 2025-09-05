@@ -1,15 +1,16 @@
-# 02_Woo_Fetch_Last_Order_By_Name.py
+# 02_Woo_Fetch_Latest_Order_By_Name_fast.py
 import io
 import time
 import re
 from urllib.parse import urljoin
 from difflib import SequenceMatcher
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
 
 import requests
 import pandas as pd
 import streamlit as st
 
-# Page
 st.set_page_config(page_title="Woo fetch latest order by Name", page_icon="🧾", layout="wide")
 st.markdown(
     """
@@ -22,11 +23,6 @@ st.markdown(
 )
 
 # Secrets
-# .streamlit/secrets.toml
-# [woo]
-# url = "https://yourdomain.com"
-# ck = "ck_xxx"
-# cs = "cs_xxx"
 if "woo" not in st.secrets:
     st.error("Woo secrets missing. Add [woo] url, ck, cs in .streamlit/secrets.toml")
     st.stop()
@@ -34,6 +30,9 @@ if "woo" not in st.secrets:
 BASE_URL = st.secrets["woo"]["url"].rstrip("/") + "/"
 CK = st.secrets["woo"]["ck"]
 CS = st.secrets["woo"]["cs"]
+
+# Single session for keep-alive
+SESSION = requests.Session()
 
 # --------------- Text and name utils ---------------
 def norm_text(s: str, lower=True, strip_punct=True, collapse_ws=True) -> str:
@@ -52,7 +51,6 @@ def tokens(s: str) -> list[str]:
     return [t for t in norm_text(s).split() if t]
 
 def dedupe_repeated_sequence(tok: list[str]) -> list[str]:
-    # Compress exact repeats like ["haley","mcquire","haley","mcquire"] → first half
     while len(tok) >= 2 and len(tok) % 2 == 0 and tok[: len(tok)//2] == tok[len(tok)//2 :]:
         tok = tok[: len(tok)//2]
     return tok
@@ -93,7 +91,6 @@ def contains_token(candidate_name: str, token: str | None) -> bool:
     return token in set(tokens(candidate_name))
 
 def match_class(candidate_name: str, target_full: str) -> str:
-    # both means candidate contains both first and last tokens from target
     f, l = split_first_last(target_full)
     cand = canonical_name_simple(candidate_name)
     has_f = contains_token(cand, f)
@@ -168,14 +165,20 @@ def address_accept(metrics: dict, th_jaccard: float, th_seq: float) -> bool:
         return True
     return False
 
-# --------------- Woo API helpers ---------------
+# --------------- Woo API helpers with caching ---------------
+def _status_csv(statuses):
+    if not statuses:
+        return None
+    return ",".join(statuses)
+
 def woo_get(path: str, params: dict) -> requests.Response:
     url = urljoin(BASE_URL, path)
-    resp = requests.get(url, params=params, auth=(CK, CS), timeout=30)
+    resp = SESSION.get(url, params=params, auth=(CK, CS), timeout=30)
     resp.raise_for_status()
     return resp
 
-def fetch_customers_by_search(q: str, per_page=100) -> list:
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_customers_search(q: str, per_page: int) -> list:
     params = {
         "search": q,
         "per_page": per_page,
@@ -183,6 +186,22 @@ def fetch_customers_by_search(q: str, per_page=100) -> list:
         "order": "desc",
     }
     r = woo_get("wp-json/wc/v3/customers", params)
+    return r.json()
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_orders_page(q: str, page: int, per_page: int, status_csv: str | None, after_iso: str | None) -> list:
+    params = {
+        "search": q,
+        "per_page": per_page,
+        "page": page,
+        "orderby": "date",
+        "order": "desc",
+    }
+    if status_csv:
+        params["status"] = status_csv
+    if after_iso:
+        params["after"] = after_iso
+    r = woo_get("wp-json/wc/v3/orders", params)
     return r.json()
 
 def fetch_latest_order_for_customer(customer_id: int, allowed_statuses: list[str] | None = None) -> dict | None:
@@ -193,7 +212,7 @@ def fetch_latest_order_for_customer(customer_id: int, allowed_statuses: list[str
         "order": "desc",
     }
     if allowed_statuses:
-        params["status"] = ",".join(allowed_statuses)
+        params["status"] = _status_csv(allowed_statuses)
     r = woo_get("wp-json/wc/v3/orders", params)
     arr = r.json()
     if not arr:
@@ -203,50 +222,34 @@ def fetch_latest_order_for_customer(customer_id: int, allowed_statuses: list[str
     arr.sort(key=_dt, reverse=True)
     return arr[0]
 
-def fetch_recent_orders_search(q: str, pages=3, per_page=100, allowed_statuses: list[str] | None = None) -> list:
+def fetch_recent_orders_search(q: str, pages: int, per_page: int, allowed_statuses: list[str] | None, after_iso: str | None) -> list:
     results = []
+    status_csv = _status_csv(allowed_statuses)
     for page in range(1, pages + 1):
-        params = {
-            "search": q,
-            "per_page": per_page,
-            "page": page,
-            "orderby": "date",
-            "order": "desc",
-        }
-        if allowed_statuses:
-            params["status"] = ",".join(allowed_statuses)
-        r = woo_get("wp-json/wc/v3/orders", params)
-        arr = r.json()
+        arr = cached_orders_page(q, page, per_page, status_csv, after_iso)
         if not arr:
             break
         results.extend(arr)
-        time.sleep(0.15)
     return results
 
 # --------------- Candidate selection with strict priority ---------------
 def pick_best_customer_with_priority(customers: list, target_full: str, threshold: float) -> dict | None:
-    # Build scored candidates
     cands = []
     for c in customers:
         full = canonical_name_from_parts(c.get("first_name", ""), c.get("last_name", ""))
         cls = match_class(full, target_full)
         score = name_ratio(full, target_full)
         cands.append((c, cls, score))
-
     if not cands:
         return None
-
-    # Filter by class priority strictly
     for cls_want in ("both", "last", "first"):
         tier = [(c, s) for c, cls, s in cands if cls == cls_want and s >= threshold]
         if tier:
-            # choose highest score within this tier
             tier.sort(key=lambda x: x[1], reverse=True)
             return tier[0][0]
     return None
 
 def pick_latest_order_by_billing_name_with_priority(orders: list, target_full: str, threshold: float) -> dict | None:
-    # Build scored candidates
     cands = []
     for o in orders:
         b = o.get("billing") or {}
@@ -254,14 +257,10 @@ def pick_latest_order_by_billing_name_with_priority(orders: list, target_full: s
         cls = match_class(full, target_full)
         score = name_ratio(full, target_full)
         cands.append((o, cls, score))
-
     if not cands:
         return None
-
-    # Evaluate strictly by class priority then newest date then score
     def dt_key(o):
         return o.get("date_created_gmt") or o.get("date_created") or ""
-
     for cls_want in ("both", "last", "first"):
         tier = [(o, s) for o, cls, s in cands if cls == cls_want and s >= threshold]
         if tier:
@@ -269,10 +268,9 @@ def pick_latest_order_by_billing_name_with_priority(orders: list, target_full: s
             return tier[0][0]
     return None
 
-# --------------- UI and controls ---------------
+# --------------- UI ---------------
 st.subheader("Upload Excel with Name and Address")
 uploaded = st.file_uploader("Excel file", type=["xlsx", "xls"])
-
 if uploaded is None:
     st.stop()
 
@@ -299,9 +297,9 @@ c1, c2, c3 = st.columns(3)
 with c1:
     name_conf_threshold = st.slider("Minimum name similarity to accept", 0.50, 0.99, 0.85, 0.01)
 with c2:
-    order_search_pages = st.number_input("Fallback order search pages", min_value=1, max_value=20, value=5, step=1)
+    order_search_pages = st.number_input("Order search pages", min_value=1, max_value=20, value=3, step=1)
 with c3:
-    per_page_orders = st.number_input("Orders per page when searching", min_value=20, max_value=100, value=100, step=10)
+    per_page_orders = st.number_input("Orders per page", min_value=20, max_value=100, value=100, step=10)
 
 c4, c5, c6 = st.columns(3)
 with c4:
@@ -309,17 +307,51 @@ with c4:
 with c5:
     addr_accept_ratio = st.slider("Accept address if Sequence ratio ≥", 0.10, 1.0, 0.60, 0.05)
 with c6:
-    pause_ms = st.number_input("Pause between API calls ms", min_value=0, max_value=2000, value=100, step=50)
+    pause_ms = st.number_input("Pause between rows ms", min_value=0, max_value=1000, value=0, step=50)
 
-with st.expander("Order status filter optional"):
-    use_filter = st.checkbox("Filter by allowed statuses", value=False)
-    allowed_statuses = ["processing", "completed", "on-hold", "pending", "failed"]
-    if not use_filter:
-        allowed_statuses = None
+with st.expander("Advanced speed settings"):
+    preload = st.checkbox("Preload cache for all unique queries", value=True)
+    max_workers = st.number_input("Concurrent workers for preload", min_value=1, max_value=16, value=6, step=1)
+    use_filter = st.checkbox("Filter by allowed statuses", value=True)
+    allowed_statuses = ["processing", "completed", "on-hold", "pending", "failed"] if use_filter else None
+    use_after = st.checkbox("Limit orders to recent period", value=True)
+    default_after = (datetime.utcnow() - timedelta(days=365)).isoformat() + "Z"
+    after_iso = st.text_input("After ISO8601 UTC", value=default_after if use_after else "")
 
 run = st.button("Fetch from Woo and build final sheet")
 if not run:
     st.stop()
+
+# --------------- Optional preload to warm caches ---------------
+def build_prioritized_queries(fullname: str) -> list[tuple[str, str]]:
+    f_tok, l_tok = split_first_last(fullname)
+    queries = []
+    full_q = canonical_name_simple(fullname)
+    if full_q:
+        queries.append(("both", full_q))
+    if l_tok:
+        queries.append(("last", l_tok))
+    if f_tok:
+        queries.append(("first", f_tok))
+    return queries
+
+if preload:
+    unique_qs = set()
+    for _, r in df.iterrows():
+        n = canonical_name_simple(str(r.get(name_col, "") or ""))
+        for _, q in build_prioritized_queries(n):
+            if q:
+                unique_qs.add(q)
+    status_csv = _status_csv(allowed_statuses)
+    st.info(f"Preloading {len(unique_qs)} unique queries into cache")
+    tasks = []
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        for q in unique_qs:
+            tasks.append(ex.submit(cached_customers_search, q, 100))
+            for page in range(1, order_search_pages + 1):
+                tasks.append(ex.submit(cached_orders_page, q, page, per_page_orders, status_csv, after_iso or None))
+        for _ in as_completed(tasks):
+            pass  # just warm the cache
 
 # --------------- Processing ---------------
 rows = []
@@ -350,43 +382,29 @@ for idx, row in df.iterrows():
     }
 
     try:
-        # Build prioritized queries: full name then last token then first token
-        f_tok, l_tok = split_first_last(target_full)
-        queries = []
-        full_q = canonical_name_simple(target_full)
-        if full_q:
-            queries.append(("both", full_q))
-        if l_tok:
-            queries.append(("last", l_tok))
-        if f_tok:
-            queries.append(("first", f_tok))
+        # Priority queries full then last then first and early stop
+        queries = build_prioritized_queries(target_full)
 
         order = None
         best_sim = 0.0
 
-        # Priority 1: search customers by queries in order and pick best class and score
-        best_customer = None
+        # customers first by priority
         for cls_want, q in queries:
-            customers = fetch_customers_by_search(q)
+            customers = cached_customers_search(q, 100)
             cand = pick_best_customer_with_priority(customers, target_full, name_conf_threshold)
             if cand:
                 full = canonical_name_from_parts(cand.get("first_name", ""), cand.get("last_name", ""))
                 sim = name_ratio(full, target_full)
                 if class_priority(match_class(full, target_full)) >= class_priority(cls_want) and sim >= name_conf_threshold:
-                    best_customer = cand
+                    order = fetch_latest_order_for_customer(cand["id"], allowed_statuses=allowed_statuses)
+                    result["MatchSource"] = "customer"
                     best_sim = sim
                     break
-            time.sleep(pause_ms / 1000.0)
 
-        if best_customer:
-            order = fetch_latest_order_for_customer(best_customer["id"], allowed_statuses=allowed_statuses)
-            result["MatchSource"] = "customer"
-            result["NameSimUsed"] = round(best_sim, 3)
-
-        # Priority 2: orders search by queries if not found via customers
+        # fallback orders search by priority
         if order is None:
             for cls_want, q in queries:
-                orders = fetch_recent_orders_search(q, pages=order_search_pages, per_page=per_page_orders, allowed_statuses=allowed_statuses)
+                orders = fetch_recent_orders_search(q, order_search_pages, per_page_orders, allowed_statuses, after_iso or None)
                 cand = pick_latest_order_by_billing_name_with_priority(orders, target_full, name_conf_threshold)
                 if cand:
                     b = cand.get("billing") or {}
@@ -395,16 +413,13 @@ for idx, row in df.iterrows():
                     sim = name_ratio(full, target_full)
                     if class_priority(mcls) >= class_priority(cls_want) and sim >= name_conf_threshold:
                         order = cand
-                        best_sim = sim
                         result["MatchSource"] = "orders"
-                        result["NameSimUsed"] = round(best_sim, 3)
+                        best_sim = sim
                         break
-                time.sleep(pause_ms / 1000.0)
 
         if order:
             billing = order.get("billing") or {}
             shipping = order.get("shipping") or {}
-
             result["OrderID"] = order.get("id")
             result["BillingEmail"] = billing.get("email")
             result["BillingPhone"] = billing.get("phone")
@@ -418,6 +433,7 @@ for idx, row in df.iterrows():
             result["NumOverlap"] = m["num_overlap"]
 
             ok = address_accept(m, addr_accept_jaccard, addr_accept_ratio)
+            result["NameSimUsed"] = round(best_sim, 3)
             result["MatchNote"] = "OK" if ok else "Address differs"
         else:
             result["MatchNote"] = "No match"
@@ -430,13 +446,13 @@ for idx, row in df.iterrows():
     rows.append(result)
     progress.progress(int(((idx + 1) / n) * 100))
     status.text(f"Processed {idx + 1} of {n}")
-    time.sleep(pause_ms / 1000.0)
+    if pause_ms:
+        time.sleep(pause_ms / 1000.0)
 
 progress.progress(100)
 status.text("Done")
 
 out_df = pd.DataFrame(rows)
-
 st.subheader("Preview")
 st.dataframe(out_df.head(30), use_container_width=True)
 
