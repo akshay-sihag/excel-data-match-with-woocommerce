@@ -411,14 +411,19 @@ for idx, row in df.iterrows():
             
             result["Name"] = full_name if full_name else None
             
-            # Get phone number - try billing first, then shipping
-            phone = billing.get("phone", "") or shipping.get("phone", "")
-            if phone:
-                # Remove leading + and any digits following it (like +1, +91, etc.)
-                phone = re.sub(r'^\+\d*\s*', '', str(phone))
-                # Remove all non-digit characters (dashes, spaces, parentheses, etc.)
+            # Get phone number - try billing first, then shipping as fallback
+            phone = billing.get("phone")
+            if not phone or str(phone).strip() == "":
+                phone = shipping.get("phone")
+            
+            if phone and str(phone).strip():
+                # Clean phone number - remove country code and special characters
+                phone = str(phone).strip()
+                phone = re.sub(r'^\+\d*\s*', '', phone)
                 phone = re.sub(r'\D', '', phone)
-            result["Phone"] = phone if phone else None
+                result["Phone"] = phone if phone else None
+            else:
+                result["Phone"] = None
             
             # Address fields from shipping only
             result["Address line 1"] = shipping.get("address_1")
