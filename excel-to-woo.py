@@ -333,19 +333,14 @@ for idx, row in df.iterrows():
     target_full = canonical_name_simple(name_raw)
 
     result = {
-        "Name": name_raw,
-        "InputAddress": addr_raw,
+        "Name": None,
+        "Phone": None,
+        "Address line 1": None,
+        "Address line 2": None,
+        "City": None,
+        "Zipcode": None,
+        "State": None,
         "OrderID": None,
-        "BillingEmail": None,
-        "BillingPhone": None,
-        "WooShippingAddress": None,
-        "AddrJaccard": None,
-        "AddrSeqRatio": None,
-        "ZipMatch": None,
-        "HouseNumMatch": None,
-        "NumOverlap": None,
-        "NameSimUsed": None,
-        "MatchSource": None,
         "MatchNote": None,
     }
 
@@ -380,8 +375,6 @@ for idx, row in df.iterrows():
 
         if best_customer:
             order = fetch_latest_order_for_customer(best_customer["id"], allowed_statuses=allowed_statuses)
-            result["MatchSource"] = "customer"
-            result["NameSimUsed"] = round(best_sim, 3)
 
         # Priority 2: orders search by queries if not found via customers
         if order is None:
@@ -396,8 +389,6 @@ for idx, row in df.iterrows():
                     if class_priority(mcls) >= class_priority(cls_want) and sim >= name_conf_threshold:
                         order = cand
                         best_sim = sim
-                        result["MatchSource"] = "orders"
-                        result["NameSimUsed"] = round(best_sim, 3)
                         break
                 time.sleep(pause_ms / 1000.0)
 
@@ -405,18 +396,39 @@ for idx, row in df.iterrows():
             billing = order.get("billing") or {}
             shipping = order.get("shipping") or {}
 
+            # Try to get name from shipping first, fall back to billing
+            shipping_first = shipping.get("first_name", "").strip()
+            shipping_last = shipping.get("last_name", "").strip()
+            shipping_full = f"{shipping_first} {shipping_last}".strip()
+            
+            if shipping_full:
+                full_name = shipping_full
+            else:
+                # Fall back to billing name
+                billing_first = billing.get("first_name", "").strip()
+                billing_last = billing.get("last_name", "").strip()
+                full_name = f"{billing_first} {billing_last}".strip()
+            
+            result["Name"] = full_name if full_name else None
+            
+            # Clean phone number - remove country code and all non-digit characters
+            phone = billing.get("phone", "")
+            if phone:
+                # Remove leading + and any digits following it (like +1, +91, etc.)
+                phone = re.sub(r'^\+\d*\s*', '', str(phone))
+                # Remove all non-digit characters (dashes, spaces, parentheses, etc.)
+                phone = re.sub(r'\D', '', phone)
+            result["Phone"] = phone if phone else None
+            
+            # Address fields from shipping only
+            result["Address line 1"] = shipping.get("address_1")
+            result["Address line 2"] = shipping.get("address_2")
+            result["City"] = shipping.get("city")
+            result["Zipcode"] = shipping.get("postcode")
+            result["State"] = shipping.get("state")
             result["OrderID"] = order.get("id")
-            result["BillingEmail"] = billing.get("email")
-            result["BillingPhone"] = billing.get("phone")
 
             m = address_match_metrics(addr_raw, shipping)
-            result["WooShippingAddress"] = m["wc_joined"]
-            result["AddrJaccard"] = m["jaccard"]
-            result["AddrSeqRatio"] = m["seq_ratio"]
-            result["ZipMatch"] = m["zip_match"]
-            result["HouseNumMatch"] = m["house_num_match"]
-            result["NumOverlap"] = m["num_overlap"]
-
             ok = address_accept(m, addr_accept_jaccard, addr_accept_ratio)
             result["MatchNote"] = "OK" if ok else "Address differs"
         else:
