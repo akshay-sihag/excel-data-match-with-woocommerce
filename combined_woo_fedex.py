@@ -442,9 +442,10 @@ if run:
                 
                 result["Name"] = full_name if full_name else None
                 
-                # Clean phone number
-                phone = billing.get("phone", "")
+                # Get phone number - try billing first, then shipping
+                phone = billing.get("phone", "") or shipping.get("phone", "")
                 if phone:
+                    # Clean phone number - remove country code and special characters
                     phone = re.sub(r'^\+\d*\s*', '', str(phone))
                     phone = re.sub(r'\D', '', phone)
                 result["Phone"] = phone if phone else None

@@ -411,8 +411,8 @@ for idx, row in df.iterrows():
             
             result["Name"] = full_name if full_name else None
             
-            # Clean phone number - remove country code and all non-digit characters
-            phone = billing.get("phone", "")
+            # Get phone number - try billing first, then shipping
+            phone = billing.get("phone", "") or shipping.get("phone", "")
             if phone:
                 # Remove leading + and any digits following it (like +1, +91, etc.)
                 phone = re.sub(r'^\+\d*\s*', '', str(phone))
