@@ -430,16 +430,21 @@ if run:
                 shipping = order.get("shipping") or {}
 
                 # Try to get name from shipping first, fall back to billing
-                shipping_first = shipping.get("first_name", "").strip()
-                shipping_last = shipping.get("last_name", "").strip()
-                shipping_full = f"{shipping_first} {shipping_last}".strip()
+                # Use canonical_name_from_parts to clean up duplicates and formatting
+                shipping_first = shipping.get("first_name", "")
+                shipping_last = shipping.get("last_name", "")
+                shipping_canonical = canonical_name_from_parts(shipping_first, shipping_last)
                 
-                if shipping_full:
-                    full_name = shipping_full
+                if shipping_canonical:
+                    full_name = shipping_canonical
                 else:
-                    billing_first = billing.get("first_name", "").strip()
-                    billing_last = billing.get("last_name", "").strip()
-                    full_name = f"{billing_first} {billing_last}".strip()
+                    billing_first = billing.get("first_name", "")
+                    billing_last = billing.get("last_name", "")
+                    full_name = canonical_name_from_parts(billing_first, billing_last)
+                
+                # Capitalize properly for output
+                if full_name:
+                    full_name = ' '.join(word.capitalize() for word in full_name.split())
                 
                 result["Name"] = full_name if full_name else None
                 
