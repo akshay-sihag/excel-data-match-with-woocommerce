@@ -340,11 +340,28 @@ if df.empty:
     st.error("Selected sheet is empty")
     st.stop()
 
+# Auto-detect name and address columns
+def auto_detect_column(columns, patterns):
+    """Auto-detect column based on name patterns"""
+    for idx, col in enumerate(columns):
+        col_lower = str(col).lower()
+        for pattern in patterns:
+            if pattern in col_lower:
+                return idx
+    return 0
+
+name_patterns = ['name', 'customer', 'recipient', 'client', 'contact']
+address_patterns = ['address', 'street', 'location', 'addr', 'shipping', 'delivery']
+
+columns_list = list(df.columns)
+name_idx = auto_detect_column(columns_list, name_patterns)
+addr_idx = auto_detect_column(columns_list, address_patterns)
+
 left, right = st.columns(2)
 with left:
-    name_col = st.selectbox("Name column", list(df.columns))
+    name_col = st.selectbox("Name column", columns_list, index=name_idx)
 with right:
-    addr_col = st.selectbox("Address column", list(df.columns))
+    addr_col = st.selectbox("Address column", columns_list, index=addr_idx)
 
 st.subheader("Matching options")
 c1, c2, c3 = st.columns(3)
