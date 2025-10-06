@@ -507,8 +507,8 @@ if run:
                 phone = billing.get("phone") or shipping.get("phone") or ""
                 if phone:
                     phone = str(phone).strip()
-                    # Strip country code prefix (+1, +91, etc.)
-                    phone = re.sub(r'^\+\d{0,3}\s*', '', phone)
+                    # Strip only +1 (US country code) from the beginning
+                    phone = re.sub(r'^\+1\s*', '', phone)
                     # Remove all non-digit characters (dashes, spaces, parentheses, etc.)
                     phone = re.sub(r'\D', '', phone)
                 result["Phone"] = phone if phone else None
