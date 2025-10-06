@@ -333,8 +333,8 @@ for idx, row in df.iterrows():
     target_full = canonical_name_simple(name_raw)
 
     result = {
-        "InputAddress": addr_raw,
         "Name": None,
+        "InputAddress": addr_raw,
         "Phone": None,
         "Address line 1": None,
         "Address line 2": None,
