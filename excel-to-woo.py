@@ -434,11 +434,15 @@ for idx, row in df.iterrows():
             ok = address_accept(m, addr_accept_jaccard, addr_accept_ratio)
             result["MatchNote"] = "OK" if ok else "Address differs"
         else:
+            # No match found - preserve input name
+            result["Name"] = name_raw
             result["MatchNote"] = "No match"
 
     except requests.HTTPError as http_err:
+        result["Name"] = name_raw  # Preserve input name on error
         result["MatchNote"] = f"HTTP {http_err.response.status_code}"
     except Exception as e:
+        result["Name"] = name_raw  # Preserve input name on error
         result["MatchNote"] = f"Error {type(e).__name__}"
 
     rows.append(result)
