@@ -507,127 +507,172 @@ if st.session_state.woo_output_df is not None:
     # ==================== FedEx Export Section ====================
     st.markdown("---")
     st.header("Step 3: Generate FedEx Export File")
-    st.markdown("Map the WooCommerce data above to FedEx recipient fields:")
-
-    # Get source columns from WooCommerce output
-    source_columns = ['-- Leave Empty --'] + out_df.columns.tolist()
     
-    # Create mapping interface
-    column_mapping = {}
+    # Option to use WooCommerce data or upload new file
+    data_source = st.radio(
+        "Choose data source for FedEx export:",
+        ["Use WooCommerce data above", "Upload a different Excel file"],
+        horizontal=True
+    )
     
-    map_col1, map_col2 = st.columns(2)
+    # Determine which dataframe to use
+    fedex_source_df = None
+    if data_source == "Use WooCommerce data above":
+        fedex_source_df = out_df
+        st.info("📊 Using WooCommerce matched data from Step 2")
+    else:
+        uploaded_fedex = st.file_uploader("Upload Excel file for FedEx export", type=["xlsx", "xls"], key="fedex_upload")
+        if uploaded_fedex:
+            try:
+                fedex_xls = pd.ExcelFile(uploaded_fedex)
+                fedex_sheet = st.selectbox("Select sheet", fedex_xls.sheet_names, key="fedex_sheet")
+                fedex_source_df = fedex_xls.parse(sheet_name=fedex_sheet)
+                st.success(f"✅ Loaded {len(fedex_source_df)} rows from uploaded file")
+                with st.expander("📋 Preview of Uploaded File"):
+                    st.dataframe(fedex_source_df.head(10))
+            except Exception as e:
+                st.error(f"Failed to read Excel file: {e}")
+        else:
+            st.info("👆 Please upload an Excel file to continue")
     
-    with map_col1:
-        st.markdown("#### Recipient Information")
-        column_mapping['recipientContactName'] = st.selectbox(
-            '📝 Recipient Contact Name',
-            source_columns,
-            index=source_columns.index('Name') if 'Name' in source_columns else 0,
-            key='map_name'
-        )
+    if fedex_source_df is not None:
+        st.markdown("---")
+        st.subheader("Map columns to FedEx recipient fields")
         
-        column_mapping['recipientContactNumber'] = st.selectbox(
-            '📞 Recipient Contact Number',
-            source_columns,
-            index=source_columns.index('Phone') if 'Phone' in source_columns else 0,
-            key='map_number'
-        )
+        # Get source columns
+        source_columns = ['-- Leave Empty --'] + fedex_source_df.columns.tolist()
         
-        column_mapping['recipientLine1'] = st.selectbox(
-            '🏠 Recipient Address Line 1',
-            source_columns,
-            index=source_columns.index('Address line 1') if 'Address line 1' in source_columns else 0,
-            key='map_line1'
-        )
+        # Auto-detect column mapping with aliases
+        def find_column_index(col_names, target_name, aliases=None):
+            """Find best matching column index"""
+            if aliases is None:
+                aliases = []
+            
+            search_terms = [target_name.lower()] + [a.lower() for a in aliases]
+            
+            for idx, col in enumerate(col_names):
+                col_lower = str(col).lower()
+                for term in search_terms:
+                    if term in col_lower or col_lower in term:
+                        return idx
+            return 0
         
-        column_mapping['recipientLine2'] = st.selectbox(
-            '🏢 Recipient Address Line 2',
-            source_columns,
-            index=source_columns.index('Address line 2') if 'Address line 2' in source_columns else 0,
-            key='map_line2'
-        )
-    
-    with map_col2:
-        st.markdown("#### Location Details")
-        column_mapping['recipientPostcode'] = st.selectbox(
-            '📮 Recipient Postcode',
-            source_columns,
-            index=source_columns.index('Zipcode') if 'Zipcode' in source_columns else 0,
-            key='map_postcode'
-        )
+        # Create mapping interface
+        column_mapping = {}
         
-        column_mapping['recipientCity'] = st.selectbox(
-            '🏙️ Recipient City',
-            source_columns,
-            index=source_columns.index('City') if 'City' in source_columns else 0,
-            key='map_city'
-        )
-        
-        column_mapping['recipientState'] = st.selectbox(
-            '📍 Recipient State',
-            source_columns,
-            index=source_columns.index('State') if 'State' in source_columns else 0,
-            key='map_state'
-        )
+        map_col1, map_col2 = st.columns(2)
     
-    # Check if at least one mapping is set
-    has_mapping = any(v != '-- Leave Empty --' for v in column_mapping.values())
-    
-    if not has_mapping:
-        st.warning("⚠️ Please map at least one column to proceed.")
-    
-    # Process button for FedEx
-    if st.button("🚀 Generate FedEx Export File", type="primary", disabled=not has_mapping):
-        with st.spinner("Generating FedEx file..."):
-            num_rows = len(out_df)
-            
-            # Create output dataframe
-            output_data = {}
-            
-            # Fill constant data
-            for header, value in CONSTANT_DATA.items():
-                output_data[header] = [value] * num_rows
-            
-            # Copy recipient data based on mapping
-            for target_header in RECIPIENT_HEADERS:
-                source_column = column_mapping.get(target_header, '-- Leave Empty --')
-                
-                if source_column != '-- Leave Empty --' and source_column in out_df.columns:
-                    output_data[target_header] = out_df[source_column].tolist()
-                else:
-                    output_data[target_header] = [''] * num_rows
-            
-            # Add empty columns
-            for header in EMPTY_HEADERS:
-                output_data[header] = [''] * num_rows
-            
-            # Create output dataframe
-            df_fedex = pd.DataFrame(output_data)
-            
-            # Generate filename
-            current_date = datetime.now().strftime("%d-%m-%y")
-            fedex_filename = f"Dispense-list-fedex-{current_date}.xlsx"
-            
-            # Create Excel file
-            fedex_output = io.BytesIO()
-            with pd.ExcelWriter(fedex_output, engine='openpyxl') as writer:
-                df_fedex.to_excel(writer, index=False, sheet_name='FedEx Dispatch')
-            
-            fedex_output.seek(0)
-            
-            st.success(f"✅ FedEx file generated! {len(df_fedex)} rows ready for export.")
-            
-            # Show preview
-            with st.expander("📋 Preview of FedEx Export File"):
-                st.dataframe(df_fedex.head(10))
-            
-            # Download button
-            st.download_button(
-                label="⬇️ Download FedEx Export File",
-                data=fedex_output,
-                file_name=fedex_filename,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary"
+        with map_col1:
+            st.markdown("#### Recipient Information")
+            column_mapping['recipientContactName'] = st.selectbox(
+                '📝 Recipient Contact Name',
+                source_columns,
+                index=find_column_index(source_columns, 'name', ['contact', 'customer']),
+                key='map_name'
             )
             
-            st.balloons()
+            column_mapping['recipientContactNumber'] = st.selectbox(
+                '📞 Recipient Contact Number',
+                source_columns,
+                index=find_column_index(source_columns, 'phone', ['tel', 'telephone', 'mobile', 'contact']),
+                key='map_number'
+            )
+            
+            column_mapping['recipientLine1'] = st.selectbox(
+                '🏠 Recipient Address Line 1',
+                source_columns,
+                index=find_column_index(source_columns, 'address line 1', ['address1', 'addr1', 'street']),
+                key='map_line1'
+            )
+            
+            column_mapping['recipientLine2'] = st.selectbox(
+                '🏢 Recipient Address Line 2',
+                source_columns,
+                index=find_column_index(source_columns, 'address line 2', ['address2', 'addr2', 'apt', 'suite']),
+                key='map_line2'
+            )
+        
+        with map_col2:
+            st.markdown("#### Location Details")
+            column_mapping['recipientPostcode'] = st.selectbox(
+                '📮 Recipient Postcode',
+                source_columns,
+                index=find_column_index(source_columns, 'zipcode', ['postcode', 'zip', 'postal']),
+                key='map_postcode'
+            )
+            
+            column_mapping['recipientCity'] = st.selectbox(
+                '🏙️ Recipient City',
+                source_columns,
+                index=find_column_index(source_columns, 'city', ['town', 'municipality']),
+                key='map_city'
+            )
+            
+            column_mapping['recipientState'] = st.selectbox(
+                '📍 Recipient State',
+                source_columns,
+                index=find_column_index(source_columns, 'state', ['province', 'region']),
+                key='map_state'
+            )
+        
+        # Check if at least one mapping is set
+        has_mapping = any(v != '-- Leave Empty --' for v in column_mapping.values())
+        
+        if not has_mapping:
+            st.warning("⚠️ Please map at least one column to proceed.")
+        
+        # Process button for FedEx
+        if st.button("🚀 Generate FedEx Export File", type="primary", disabled=not has_mapping):
+            with st.spinner("Generating FedEx file..."):
+                num_rows = len(fedex_source_df)
+            
+                # Create output dataframe
+                output_data = {}
+                
+                # Fill constant data
+                for header, value in CONSTANT_DATA.items():
+                    output_data[header] = [value] * num_rows
+                
+                # Copy recipient data based on mapping
+                for target_header in RECIPIENT_HEADERS:
+                    source_column = column_mapping.get(target_header, '-- Leave Empty --')
+                    
+                    if source_column != '-- Leave Empty --' and source_column in fedex_source_df.columns:
+                        output_data[target_header] = fedex_source_df[source_column].tolist()
+                    else:
+                        output_data[target_header] = [''] * num_rows
+                
+                # Add empty columns
+                for header in EMPTY_HEADERS:
+                    output_data[header] = [''] * num_rows
+                
+                # Create output dataframe
+                df_fedex = pd.DataFrame(output_data)
+                
+                # Generate filename
+                current_date = datetime.now().strftime("%d-%m-%y")
+                fedex_filename = f"Dispense-list-fedex-{current_date}.xlsx"
+                
+                # Create Excel file
+                fedex_output = io.BytesIO()
+                with pd.ExcelWriter(fedex_output, engine='openpyxl') as writer:
+                    df_fedex.to_excel(writer, index=False, sheet_name='FedEx Dispatch')
+                
+                fedex_output.seek(0)
+                
+                st.success(f"✅ FedEx file generated! {len(df_fedex)} rows ready for export.")
+                
+                # Show preview
+                with st.expander("📋 Preview of FedEx Export File"):
+                    st.dataframe(df_fedex.head(10))
+                
+                # Download button
+                st.download_button(
+                    label="⬇️ Download FedEx Export File",
+                    data=fedex_output,
+                    file_name=fedex_filename,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary"
+                )
+                
+                st.balloons()
