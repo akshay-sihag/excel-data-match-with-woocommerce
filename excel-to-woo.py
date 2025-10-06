@@ -269,6 +269,30 @@ def pick_latest_order_by_billing_name_with_priority(orders: list, target_full: s
             return tier[0][0]
     return None
 
+def pick_latest_order_by_shipping_name_with_priority(orders: list, target_full: str, threshold: float) -> dict | None:
+    # Build scored candidates from shipping names
+    cands = []
+    for o in orders:
+        s = o.get("shipping") or {}
+        full = canonical_name_from_parts(s.get("first_name", ""), s.get("last_name", ""))
+        cls = match_class(full, target_full)
+        score = name_ratio(full, target_full)
+        cands.append((o, cls, score))
+
+    if not cands:
+        return None
+
+    # Evaluate strictly by class priority then newest date then score
+    def dt_key(o):
+        return o.get("date_created_gmt") or o.get("date_created") or ""
+
+    for cls_want in ("both", "last", "first"):
+        tier = [(o, s) for o, cls, s in cands if cls == cls_want and s >= threshold]
+        if tier:
+            tier.sort(key=lambda x: (dt_key(x[0]), x[1]), reverse=True)
+            return tier[0][0]
+    return None
+
 # --------------- UI and controls ---------------
 st.subheader("Upload Excel with Name and Address")
 uploaded = st.file_uploader("Excel file", type=["xlsx", "xls"])
@@ -377,7 +401,7 @@ for idx, row in df.iterrows():
         if best_customer:
             order = fetch_latest_order_for_customer(best_customer["id"], allowed_statuses=allowed_statuses)
 
-        # Priority 2: orders search by queries if not found via customers
+        # Priority 2: orders search by billing name if not found via customers
         if order is None:
             for cls_want, q in queries:
                 orders = fetch_recent_orders_search(q, pages=order_search_pages, per_page=per_page_orders, allowed_statuses=allowed_statuses)
@@ -385,6 +409,22 @@ for idx, row in df.iterrows():
                 if cand:
                     b = cand.get("billing") or {}
                     full = canonical_name_from_parts(b.get("first_name", ""), b.get("last_name", ""))
+                    mcls = match_class(full, target_full)
+                    sim = name_ratio(full, target_full)
+                    if class_priority(mcls) >= class_priority(cls_want) and sim >= name_conf_threshold:
+                        order = cand
+                        best_sim = sim
+                        break
+                time.sleep(pause_ms / 1000.0)
+
+        # Priority 3: orders search by shipping name (in case billing name is different)
+        if order is None:
+            for cls_want, q in queries:
+                orders = fetch_recent_orders_search(q, pages=order_search_pages, per_page=per_page_orders, allowed_statuses=allowed_statuses)
+                cand = pick_latest_order_by_shipping_name_with_priority(orders, target_full, name_conf_threshold)
+                if cand:
+                    s = cand.get("shipping") or {}
+                    full = canonical_name_from_parts(s.get("first_name", ""), s.get("last_name", ""))
                     mcls = match_class(full, target_full)
                     sim = name_ratio(full, target_full)
                     if class_priority(mcls) >= class_priority(cls_want) and sim >= name_conf_threshold:
