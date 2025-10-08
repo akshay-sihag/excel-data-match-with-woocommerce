@@ -414,6 +414,7 @@ if run:
             "Zipcode": None,
             "State": None,
             "OrderID": None,
+            "OrderStatus": None,
             "MatchNote": None,
         }
 
@@ -520,6 +521,7 @@ if run:
                 result["Zipcode"] = shipping.get("postcode")
                 result["State"] = shipping.get("state")
                 result["OrderID"] = order.get("id")
+                result["OrderStatus"] = order.get("status")
 
                 m = address_match_metrics(addr_raw, shipping)
                 ok = address_accept(m, addr_accept_jaccard, addr_accept_ratio)
