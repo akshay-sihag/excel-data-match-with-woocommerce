@@ -193,28 +193,20 @@ def fetch_latest_order_for_customer(customer_id: int, allowed_statuses: list[str
     if not arr:
         return None
     
-    # Sort by: 1) Exclude failed/cancelled orders, 2) Payment date, 3) Status priority
-    def sort_key(o):
-        status = o.get("status", "").lower()
-        
-        # Deprioritize failed, cancelled, refunded orders (push them to the end)
-        if status in ["failed", "cancelled", "refunded", "trash"]:
-            status_priority = 0
-        elif status in ["completed", "processing"]:
-            status_priority = 2
-        else:
-            status_priority = 1
-        
-        # Get date (prioritize date_paid, then date_completed, then date_created)
+    # Filter out failed orders, keep everything else
+    arr = [o for o in arr if o.get("status", "").lower() != "failed"]
+    
+    if not arr:
+        return None
+    
+    # Sort by date only (most recent first)
+    def date_key(o):
         date_paid = o.get("date_paid_gmt") or o.get("date_paid")
         date_completed = o.get("date_completed_gmt") or o.get("date_completed")
         date_created = o.get("date_created_gmt") or o.get("date_created")
-        date_str = date_paid or date_completed or date_created or "1970-01-01T00:00:00"
-        
-        # Return tuple: (status_priority, date) - higher status_priority and more recent date first
-        return (status_priority, date_str)
+        return date_paid or date_completed or date_created or "1970-01-01T00:00:00"
     
-    arr.sort(key=sort_key, reverse=True)
+    arr.sort(key=date_key, reverse=True)
     return arr[0]
 
 def fetch_recent_orders_search(q: str, pages=3, per_page=100, allowed_statuses: list[str] | None = None) -> list:
@@ -259,6 +251,10 @@ def pick_best_customer_with_priority(customers: list, target_full: str, threshol
 def pick_latest_order_by_billing_name_with_priority(orders: list, target_full: str, threshold: float) -> dict | None:
     cands = []
     for o in orders:
+        # Skip failed orders
+        if o.get("status", "").lower() == "failed":
+            continue
+            
         b = o.get("billing") or {}
         full = canonical_name_from_parts(b.get("first_name", ""), b.get("last_name", ""))
         cls = match_class(full, target_full)
@@ -272,15 +268,6 @@ def pick_latest_order_by_billing_name_with_priority(orders: list, target_full: s
 
     def sort_key(x):
         o, cls, score = x
-        status = o.get("status", "").lower()
-        
-        # Deprioritize failed, cancelled, refunded orders
-        if status in ["failed", "cancelled", "refunded", "trash"]:
-            status_priority = 0
-        elif status in ["completed", "processing"]:
-            status_priority = 2
-        else:
-            status_priority = 1
         
         # Get date
         date_paid = o.get("date_paid_gmt") or o.get("date_paid")
@@ -288,16 +275,20 @@ def pick_latest_order_by_billing_name_with_priority(orders: list, target_full: s
         date_created = o.get("date_created_gmt") or o.get("date_created")
         date_str = date_paid or date_completed or date_created or "1970-01-01T00:00:00"
         
-        # Sort by: status_priority, date, class_priority, score
-        return (status_priority, date_str, class_priority(cls), score)
+        # Sort by: date (most recent first), then name match quality
+        return (date_str, class_priority(cls), score)
 
-    # Sort: completed/processing orders first, then by most recent date
+    # Sort by date only (most recent first)
     cands.sort(key=sort_key, reverse=True)
     return cands[0][0]
 
 def pick_latest_order_by_shipping_name_with_priority(orders: list, target_full: str, threshold: float) -> dict | None:
     cands = []
     for o in orders:
+        # Skip failed orders
+        if o.get("status", "").lower() == "failed":
+            continue
+            
         s = o.get("shipping") or {}
         full = canonical_name_from_parts(s.get("first_name", ""), s.get("last_name", ""))
         cls = match_class(full, target_full)
@@ -311,15 +302,6 @@ def pick_latest_order_by_shipping_name_with_priority(orders: list, target_full: 
 
     def sort_key(x):
         o, cls, score = x
-        status = o.get("status", "").lower()
-        
-        # Deprioritize failed, cancelled, refunded orders
-        if status in ["failed", "cancelled", "refunded", "trash"]:
-            status_priority = 0
-        elif status in ["completed", "processing"]:
-            status_priority = 2
-        else:
-            status_priority = 1
         
         # Get date
         date_paid = o.get("date_paid_gmt") or o.get("date_paid")
@@ -327,10 +309,10 @@ def pick_latest_order_by_shipping_name_with_priority(orders: list, target_full: 
         date_created = o.get("date_created_gmt") or o.get("date_created")
         date_str = date_paid or date_completed or date_created or "1970-01-01T00:00:00"
         
-        # Sort by: status_priority, date, class_priority, score
-        return (status_priority, date_str, class_priority(cls), score)
+        # Sort by: date (most recent first), then name match quality
+        return (date_str, class_priority(cls), score)
 
-    # Sort: completed/processing orders first, then by most recent date
+    # Sort by date only (most recent first)
     cands.sort(key=sort_key, reverse=True)
     return cands[0][0]
 
