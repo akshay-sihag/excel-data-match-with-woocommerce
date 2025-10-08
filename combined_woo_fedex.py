@@ -248,7 +248,9 @@ def pick_latest_order_by_billing_name_with_priority(orders: list, target_full: s
         full = canonical_name_from_parts(b.get("first_name", ""), b.get("last_name", ""))
         cls = match_class(full, target_full)
         score = name_ratio(full, target_full)
-        cands.append((o, cls, score))
+        # Only include orders that meet the threshold
+        if score >= threshold:
+            cands.append((o, cls, score))
 
     if not cands:
         return None
@@ -260,13 +262,10 @@ def pick_latest_order_by_billing_name_with_priority(orders: list, target_full: s
         date_created = o.get("date_created_gmt") or o.get("date_created")
         return date_paid or date_completed or date_created or "1970-01-01T00:00:00"
 
-    for cls_want in ("both", "last", "first"):
-        tier = [(o, s) for o, cls, s in cands if cls == cls_want and s >= threshold]
-        if tier:
-            # Sort by payment date (newest first), then by name similarity score (highest first)
-            tier.sort(key=lambda x: (dt_key(x[0]), x[1]), reverse=True)
-            return tier[0][0]
-    return None
+    # Sort by date FIRST (newest first), then by class priority, then by score
+    # This ensures the most recent order is always selected
+    cands.sort(key=lambda x: (dt_key(x[0]), class_priority(x[1]), x[2]), reverse=True)
+    return cands[0][0]
 
 def pick_latest_order_by_shipping_name_with_priority(orders: list, target_full: str, threshold: float) -> dict | None:
     cands = []
@@ -275,7 +274,9 @@ def pick_latest_order_by_shipping_name_with_priority(orders: list, target_full: 
         full = canonical_name_from_parts(s.get("first_name", ""), s.get("last_name", ""))
         cls = match_class(full, target_full)
         score = name_ratio(full, target_full)
-        cands.append((o, cls, score))
+        # Only include orders that meet the threshold
+        if score >= threshold:
+            cands.append((o, cls, score))
 
     if not cands:
         return None
@@ -287,13 +288,10 @@ def pick_latest_order_by_shipping_name_with_priority(orders: list, target_full: 
         date_created = o.get("date_created_gmt") or o.get("date_created")
         return date_paid or date_completed or date_created or "1970-01-01T00:00:00"
 
-    for cls_want in ("both", "last", "first"):
-        tier = [(o, s) for o, cls, s in cands if cls == cls_want and s >= threshold]
-        if tier:
-            # Sort by payment date (newest first), then by name similarity score (highest first)
-            tier.sort(key=lambda x: (dt_key(x[0]), x[1]), reverse=True)
-            return tier[0][0]
-    return None
+    # Sort by date FIRST (newest first), then by class priority, then by score
+    # This ensures the most recent order is always selected
+    cands.sort(key=lambda x: (dt_key(x[0]), class_priority(x[1]), x[2]), reverse=True)
+    return cands[0][0]
 
 # --------------- FedEx Constants ---------------
 CONSTANT_DATA = {
