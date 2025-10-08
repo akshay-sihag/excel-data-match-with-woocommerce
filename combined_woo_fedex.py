@@ -182,7 +182,7 @@ def fetch_customers_by_search(q: str, per_page=100) -> list:
 def fetch_latest_order_for_customer(customer_id: int, allowed_statuses: list[str] | None = None) -> dict | None:
     params = {
         "customer": customer_id,
-        "per_page": 5,
+        "per_page": 20,  # Increased to ensure we get all recent orders
         "orderby": "date",
         "order": "desc",
     }
@@ -192,8 +192,9 @@ def fetch_latest_order_for_customer(customer_id: int, allowed_statuses: list[str
     arr = r.json()
     if not arr:
         return None
+    # Sort by date_created_gmt for consistent timezone handling, fallback to date_created
     def _dt(o):
-        return o.get("date_created_gmt") or o.get("date_created") or ""
+        return o.get("date_created_gmt") or o.get("date_created") or "1970-01-01T00:00:00"
     arr.sort(key=_dt, reverse=True)
     return arr[0]
 
@@ -249,11 +250,14 @@ def pick_latest_order_by_billing_name_with_priority(orders: list, target_full: s
         return None
 
     def dt_key(o):
-        return o.get("date_created_gmt") or o.get("date_created") or ""
+        # Use date_created_gmt for consistent timezone sorting, fallback to date_created
+        date_str = o.get("date_created_gmt") or o.get("date_created") or "1970-01-01T00:00:00"
+        return date_str
 
     for cls_want in ("both", "last", "first"):
         tier = [(o, s) for o, cls, s in cands if cls == cls_want and s >= threshold]
         if tier:
+            # Sort by date (newest first), then by name similarity score (highest first)
             tier.sort(key=lambda x: (dt_key(x[0]), x[1]), reverse=True)
             return tier[0][0]
     return None
@@ -271,11 +275,14 @@ def pick_latest_order_by_shipping_name_with_priority(orders: list, target_full: 
         return None
 
     def dt_key(o):
-        return o.get("date_created_gmt") or o.get("date_created") or ""
+        # Use date_created_gmt for consistent timezone sorting, fallback to date_created
+        date_str = o.get("date_created_gmt") or o.get("date_created") or "1970-01-01T00:00:00"
+        return date_str
 
     for cls_want in ("both", "last", "first"):
         tier = [(o, s) for o, cls, s in cands if cls == cls_want and s >= threshold]
         if tier:
+            # Sort by date (newest first), then by name similarity score (highest first)
             tier.sort(key=lambda x: (dt_key(x[0]), x[1]), reverse=True)
             return tier[0][0]
     return None
