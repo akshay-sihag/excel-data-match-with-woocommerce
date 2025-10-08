@@ -192,9 +192,13 @@ def fetch_latest_order_for_customer(customer_id: int, allowed_statuses: list[str
     arr = r.json()
     if not arr:
         return None
-    # Sort by date_created_gmt for consistent timezone handling, fallback to date_created
+    # Sort by payment date first (most relevant), then creation date
     def _dt(o):
-        return o.get("date_created_gmt") or o.get("date_created") or "1970-01-01T00:00:00"
+        # Prioritize date_paid (when payment was captured), fall back to date_completed, then date_created
+        date_paid = o.get("date_paid_gmt") or o.get("date_paid")
+        date_completed = o.get("date_completed_gmt") or o.get("date_completed")
+        date_created = o.get("date_created_gmt") or o.get("date_created")
+        return date_paid or date_completed or date_created or "1970-01-01T00:00:00"
     arr.sort(key=_dt, reverse=True)
     return arr[0]
 
@@ -250,14 +254,16 @@ def pick_latest_order_by_billing_name_with_priority(orders: list, target_full: s
         return None
 
     def dt_key(o):
-        # Use date_created_gmt for consistent timezone sorting, fallback to date_created
-        date_str = o.get("date_created_gmt") or o.get("date_created") or "1970-01-01T00:00:00"
-        return date_str
+        # Prioritize date_paid (when payment was captured), fall back to date_completed, then date_created
+        date_paid = o.get("date_paid_gmt") or o.get("date_paid")
+        date_completed = o.get("date_completed_gmt") or o.get("date_completed")
+        date_created = o.get("date_created_gmt") or o.get("date_created")
+        return date_paid or date_completed or date_created or "1970-01-01T00:00:00"
 
     for cls_want in ("both", "last", "first"):
         tier = [(o, s) for o, cls, s in cands if cls == cls_want and s >= threshold]
         if tier:
-            # Sort by date (newest first), then by name similarity score (highest first)
+            # Sort by payment date (newest first), then by name similarity score (highest first)
             tier.sort(key=lambda x: (dt_key(x[0]), x[1]), reverse=True)
             return tier[0][0]
     return None
@@ -275,14 +281,16 @@ def pick_latest_order_by_shipping_name_with_priority(orders: list, target_full: 
         return None
 
     def dt_key(o):
-        # Use date_created_gmt for consistent timezone sorting, fallback to date_created
-        date_str = o.get("date_created_gmt") or o.get("date_created") or "1970-01-01T00:00:00"
-        return date_str
+        # Prioritize date_paid (when payment was captured), fall back to date_completed, then date_created
+        date_paid = o.get("date_paid_gmt") or o.get("date_paid")
+        date_completed = o.get("date_completed_gmt") or o.get("date_completed")
+        date_created = o.get("date_created_gmt") or o.get("date_created")
+        return date_paid or date_completed or date_created or "1970-01-01T00:00:00"
 
     for cls_want in ("both", "last", "first"):
         tier = [(o, s) for o, cls, s in cands if cls == cls_want and s >= threshold]
         if tier:
-            # Sort by date (newest first), then by name similarity score (highest first)
+            # Sort by payment date (newest first), then by name similarity score (highest first)
             tier.sort(key=lambda x: (dt_key(x[0]), x[1]), reverse=True)
             return tier[0][0]
     return None
