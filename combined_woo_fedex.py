@@ -32,6 +32,13 @@ CK = st.secrets["woo"]["ck"]
 CS = st.secrets["woo"]["cs"]
 
 # --------------- Text and name utils ---------------
+def strip_parentheses_content(s: str) -> str:
+    """Remove any text within parentheses, e.g., '123 Main St (STAY -5mg)' -> '123 Main St'"""
+    if s is None:
+        return ""
+    # Remove anything in parentheses including the parentheses themselves
+    return re.sub(r'\([^)]*\)', '', str(s)).strip()
+
 def norm_text(s: str, lower=True, strip_punct=True, collapse_ws=True) -> str:
     if s is None:
         return ""
@@ -53,11 +60,17 @@ def dedupe_repeated_sequence(tok: list[str]) -> list[str]:
     return tok
 
 def canonical_name_simple(name: str) -> str:
+    # Strip parentheses content before processing
+    name = strip_parentheses_content(name)
     t = tokens(name)
     t = dedupe_repeated_sequence(t)
     return " ".join(t)
 
 def canonical_name_from_parts(first: str, last: str) -> str:
+    # Strip parentheses content from names before processing
+    first = strip_parentheses_content(first)
+    last = strip_parentheses_content(last)
+    
     t_first = tokens(first)
     t_last = tokens(last)
     combined = dedupe_repeated_sequence(t_first + t_last)
@@ -123,7 +136,9 @@ def address_concat(parts: dict) -> str:
         parts.get("postcode") or "",
         parts.get("country") or "",
     ]
-    return " ".join([s for s in segs if s]).strip()
+    # Strip parentheses content from each segment before concatenating
+    segs = [strip_parentheses_content(s) for s in segs if s]
+    return " ".join(segs).strip()
 
 def extract_numeric_tokens(s: str) -> list[str]:
     return re.findall(r"\d+", s or "")
@@ -438,7 +453,12 @@ if run:
     for idx, row in df.iterrows():
         name_raw = str(row.get(name_col, "") or "")
         addr_raw = str(row.get(addr_col, "") or "")
-        target_full = canonical_name_simple(name_raw)
+        
+        # Strip parentheses content from name and address before matching
+        name_for_matching = strip_parentheses_content(name_raw)
+        addr_for_matching = strip_parentheses_content(addr_raw)
+        
+        target_full = canonical_name_simple(name_for_matching)
 
         result = {
             "Name": None,
@@ -559,7 +579,7 @@ if run:
                 result["OrderID"] = order.get("id")
                 result["OrderStatus"] = order.get("status")
 
-                m = address_match_metrics(addr_raw, shipping)
+                m = address_match_metrics(addr_for_matching, shipping)
                 ok = address_accept(m, addr_accept_jaccard, addr_accept_ratio)
                 result["MatchNote"] = "OK" if ok else "Address differs"
             else:
