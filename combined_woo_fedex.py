@@ -127,7 +127,7 @@ def jaccard(a: str, b: str) -> float:
     uni = len(A | B)
     return inter / uni if uni else 0.0
 
-def address_concat(parts: dict) -> str:
+def address_concat(parts: dict, strip_parens: bool = True) -> str:
     segs = [
         parts.get("address_1") or "",
         parts.get("address_2") or "",
@@ -136,8 +136,11 @@ def address_concat(parts: dict) -> str:
         parts.get("postcode") or "",
         parts.get("country") or "",
     ]
-    # Strip parentheses content from each segment before concatenating
-    segs = [strip_parentheses_content(s) for s in segs if s]
+    # Optionally strip parentheses content from each segment before concatenating
+    if strip_parens:
+        segs = [strip_parentheses_content(s) for s in segs if s]
+    else:
+        segs = [s for s in segs if s]
     return " ".join(segs).strip()
 
 def extract_numeric_tokens(s: str) -> list[str]:
