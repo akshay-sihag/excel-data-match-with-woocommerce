@@ -475,6 +475,7 @@ if run:
             "OrderID": None,
             "OrderStatus": None,
             "ShippingMethod": None,
+            "ShippingCost": None,
             "MatchNote": None,
         }
 
@@ -583,14 +584,19 @@ if run:
                 result["OrderID"] = order.get("id")
                 result["OrderStatus"] = order.get("status")
                 
-                # Extract shipping method name
+                # Extract shipping method name and cost
                 shipping_lines = order.get("shipping_lines", [])
                 if shipping_lines and len(shipping_lines) > 0:
                     # Get the first shipping method (usually there's only one)
                     shipping_method = shipping_lines[0].get("method_title") or shipping_lines[0].get("method_id", "")
                     result["ShippingMethod"] = shipping_method if shipping_method else None
+                    
+                    # Get shipping cost
+                    shipping_cost = shipping_lines[0].get("total")
+                    result["ShippingCost"] = shipping_cost if shipping_cost else None
                 else:
                     result["ShippingMethod"] = None
+                    result["ShippingCost"] = None
 
                 m = address_match_metrics(addr_for_matching, shipping)
                 ok = address_accept(m, addr_accept_jaccard, addr_accept_ratio)
