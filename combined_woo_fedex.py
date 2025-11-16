@@ -564,7 +564,7 @@ with st.expander("⚙️ Advanced Settings"):
 
 with st.expander("Order status filter"):
     use_filter = st.checkbox("Filter by allowed statuses", value=True)
-    allowed_statuses = ["order-approved", "on-hold", "processing"]
+    allowed_statuses = ["order-approved", "on-hold", "processing", "completed"]
     if not use_filter:
         allowed_statuses = None
 
