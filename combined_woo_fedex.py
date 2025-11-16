@@ -604,6 +604,7 @@ if run:
             "OrderStatus": None,
             "ShippingMethod": None,
             "ShippingCost": None,
+            "ShippingType": None,
             "MatchNote": None,
         }
 
@@ -680,9 +681,23 @@ if run:
                     # Get shipping cost
                     shipping_cost = shipping_lines[0].get("total")
                     result["ShippingCost"] = shipping_cost if shipping_cost else None
+                    
+                    # Determine shipping type based on cost
+                    if shipping_cost:
+                        try:
+                            cost_value = float(shipping_cost)
+                            if cost_value == 39.99:
+                                result["ShippingType"] = "Overnight shipping"
+                            else:
+                                result["ShippingType"] = "Express Shipping"
+                        except (ValueError, TypeError):
+                            result["ShippingType"] = "Express Shipping"
+                    else:
+                        result["ShippingType"] = "Express Shipping"
                 else:
                     result["ShippingMethod"] = None
                     result["ShippingCost"] = None
+                    result["ShippingType"] = "Express Shipping"
 
                 # Determine match quality based on similarity score
                 match_quality = get_match_quality(best_sim)
