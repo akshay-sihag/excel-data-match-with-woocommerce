@@ -5,6 +5,7 @@ import re
 from urllib.parse import urljoin
 from difflib import SequenceMatcher
 from datetime import datetime
+from functools import lru_cache
 
 import requests
 import pandas as pd
@@ -181,11 +182,55 @@ def address_accept(metrics: dict, th_jaccard: float, th_seq: float) -> bool:
     return False
 
 # --------------- Woo API helpers ---------------
-def woo_get(path: str, params: dict) -> requests.Response:
+def woo_get_with_retry(path: str, params: dict, max_retries: int = 3, initial_delay: float = 2.0) -> requests.Response:
+    """
+    Make API request with automatic retry and exponential backoff.
+    Retries on network errors, timeouts, and 5xx server errors.
+    """
     url = urljoin(BASE_URL, path)
+    delay = initial_delay
+    
+    for attempt in range(max_retries):
+        try:
+            resp = requests.get(url, params=params, auth=(CK, CS), timeout=30)
+            
+            # Retry on rate limiting (429) or server errors (5xx)
+            if resp.status_code == 429 or resp.status_code >= 500:
+                if attempt < max_retries - 1:
+                    time.sleep(delay)
+                    delay *= 2  # Exponential backoff
+                    continue
+            
+            resp.raise_for_status()
+            return resp
+            
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            if attempt < max_retries - 1:
+                time.sleep(delay)
+                delay *= 2  # Exponential backoff
+                continue
+            else:
+                raise  # Re-raise on final attempt
+        except requests.exceptions.RequestException as e:
+            # Don't retry on client errors (4xx except 429)
+            if hasattr(e, 'response') and e.response is not None:
+                if 400 <= e.response.status_code < 500 and e.response.status_code != 429:
+                    raise
+            if attempt < max_retries - 1:
+                time.sleep(delay)
+                delay *= 2
+                continue
+            else:
+                raise
+    
+    # Final attempt
     resp = requests.get(url, params=params, auth=(CK, CS), timeout=30)
     resp.raise_for_status()
     return resp
+
+def woo_get(path: str, params: dict) -> requests.Response:
+    """Wrapper for backward compatibility - uses retry logic"""
+    return woo_get_with_retry(path, params)
 
 def fetch_customers_by_search(q: str, per_page=100) -> list:
     params = {
@@ -361,6 +406,10 @@ def adaptive_search_with_thresholds(
     Adaptive search that tries progressively lower thresholds.
     Returns (order, similarity_score, match_source)
     match_source can be: "customer", "billing", "shipping", or "none"
+    
+    Optimized with early stopping:
+    - Stops at Perfect/Good match (≥0.85) for speed
+    - Only continues to lower thresholds if no good match found
     """
     # Progressive thresholds from high to low
     thresholds = [0.95, 0.90, 0.85, 0.80, 0.75, 0.70]
@@ -375,7 +424,9 @@ def adaptive_search_with_thresholds(
                 if class_priority(match_class(full, target_full)) >= class_priority(cls_want):
                     order = fetch_latest_order_for_customer(cand["id"], allowed_statuses=allowed_statuses)
                     if order:
-                        return order, sim, "customer"
+                        # Early stop if we found a "Good match" or better (≥0.85)
+                        if sim >= 0.85:
+                            return order, sim, "customer"
             time.sleep(pause_ms / 1000.0)
         
         # Priority 2: orders search by billing name
@@ -387,7 +438,9 @@ def adaptive_search_with_thresholds(
                 full = canonical_name_from_parts(b.get("first_name", ""), b.get("last_name", ""))
                 mcls = match_class(full, target_full)
                 if class_priority(mcls) >= class_priority(cls_want):
-                    return cand, sim, "billing"
+                    # Early stop if we found a "Good match" or better (≥0.85)
+                    if sim >= 0.85:
+                        return cand, sim, "billing"
             time.sleep(pause_ms / 1000.0)
         
         # Priority 3: orders search by shipping name
@@ -399,7 +452,9 @@ def adaptive_search_with_thresholds(
                 full = canonical_name_from_parts(s.get("first_name", ""), s.get("last_name", ""))
                 mcls = match_class(full, target_full)
                 if class_priority(mcls) >= class_priority(cls_want):
-                    return cand, sim, "shipping"
+                    # Early stop if we found a "Good match" or better (≥0.85)
+                    if sim >= 0.85:
+                        return cand, sim, "shipping"
             time.sleep(pause_ms / 1000.0)
     
     return None, 0.0, "none"
@@ -492,7 +547,7 @@ st.info("🤖 **Smart Matching Enabled**: The system will automatically adjust m
 
 c1, c2 = st.columns(2)
 with c1:
-    order_search_pages = st.number_input("Fallback order search pages", min_value=1, max_value=20, value=5, step=1)
+    order_search_pages = st.number_input("Fallback order search pages", min_value=1, max_value=20, value=3, step=1, help="Reduced default for faster processing. Increase if matches are not found.")
 with c2:
     per_page_orders = st.number_input("Orders per page", min_value=20, max_value=100, value=100, step=10)
 
@@ -503,7 +558,9 @@ with st.expander("⚙️ Advanced Settings"):
     with c5:
         addr_accept_ratio = st.slider("Accept address if Sequence ratio ≥", 0.10, 1.0, 0.60, 0.05)
     with c6:
-        pause_ms = st.number_input("Pause between API calls ms", min_value=0, max_value=2000, value=100, step=50)
+        pause_ms = st.number_input("Pause between API calls ms", min_value=0, max_value=2000, value=50, step=25)
+    
+    st.info("🔄 **Auto-Retry**: Failed requests will automatically retry up to 3 times with smart backoff")
 
 with st.expander("Order status filter"):
     use_filter = st.checkbox("Filter by allowed statuses", value=True)
@@ -646,14 +703,24 @@ if run:
 
         except requests.HTTPError as http_err:
             result["Name"] = name_raw  # Preserve input name on error
-            result["MatchNote"] = f"HTTP {http_err.response.status_code}"
+            status_code = http_err.response.status_code if http_err.response else "Unknown"
+            if status_code == 429:
+                result["MatchNote"] = f"Rate limited (retries exhausted)"
+            else:
+                result["MatchNote"] = f"HTTP error {status_code} (after retries)"
+        except requests.exceptions.Timeout:
+            result["Name"] = name_raw
+            result["MatchNote"] = "Timeout (after retries)"
+        except requests.exceptions.ConnectionError:
+            result["Name"] = name_raw
+            result["MatchNote"] = "Connection error (after retries)"
         except Exception as e:
             result["Name"] = name_raw  # Preserve input name on error
-            result["MatchNote"] = f"Error {type(e).__name__}"
+            result["MatchNote"] = f"Error: {type(e).__name__}"
 
         rows.append(result)
         progress.progress(int(((idx + 1) / n) * 100))
-        status.text(f"Processed {idx + 1} of {n}")
+        status.text(f"Processed {idx + 1} of {n} - {name_raw}")
         time.sleep(pause_ms / 1000.0)
 
     progress.progress(100)
