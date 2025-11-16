@@ -248,7 +248,8 @@ def fetch_recent_orders_search(q: str, pages=3, per_page=100, allowed_statuses: 
     return results
 
 # --------------- Candidate selection ---------------
-def pick_best_customer_with_priority(customers: list, target_full: str, threshold: float) -> dict | None:
+def pick_best_customer_with_priority(customers: list, target_full: str, threshold: float) -> tuple[dict | None, float]:
+    """Returns (customer, similarity_score) or (None, 0.0)"""
     cands = []
     for c in customers:
         full = canonical_name_from_parts(c.get("first_name", ""), c.get("last_name", ""))
@@ -257,16 +258,17 @@ def pick_best_customer_with_priority(customers: list, target_full: str, threshol
         cands.append((c, cls, score))
 
     if not cands:
-        return None
+        return None, 0.0
 
     for cls_want in ("both", "last", "first"):
         tier = [(c, s) for c, cls, s in cands if cls == cls_want and s >= threshold]
         if tier:
             tier.sort(key=lambda x: x[1], reverse=True)
-            return tier[0][0]
-    return None
+            return tier[0][0], tier[0][1]
+    return None, 0.0
 
-def pick_latest_order_by_billing_name_with_priority(orders: list, target_full: str, threshold: float) -> dict | None:
+def pick_latest_order_by_billing_name_with_priority(orders: list, target_full: str, threshold: float) -> tuple[dict | None, float]:
+    """Returns (order, similarity_score) or (None, 0.0)"""
     cands = []
     for o in orders:
         # Skip failed orders
@@ -282,7 +284,7 @@ def pick_latest_order_by_billing_name_with_priority(orders: list, target_full: s
             cands.append((o, cls, score))
 
     if not cands:
-        return None
+        return None, 0.0
 
     def sort_key(x):
         o, cls, score = x
@@ -298,9 +300,10 @@ def pick_latest_order_by_billing_name_with_priority(orders: list, target_full: s
 
     # Sort by date only (most recent first)
     cands.sort(key=sort_key, reverse=True)
-    return cands[0][0]
+    return cands[0][0], cands[0][2]
 
-def pick_latest_order_by_shipping_name_with_priority(orders: list, target_full: str, threshold: float) -> dict | None:
+def pick_latest_order_by_shipping_name_with_priority(orders: list, target_full: str, threshold: float) -> tuple[dict | None, float]:
+    """Returns (order, similarity_score) or (None, 0.0)"""
     cands = []
     for o in orders:
         # Skip failed orders
@@ -316,7 +319,7 @@ def pick_latest_order_by_shipping_name_with_priority(orders: list, target_full: 
             cands.append((o, cls, score))
 
     if not cands:
-        return None
+        return None, 0.0
 
     def sort_key(x):
         o, cls, score = x
@@ -332,7 +335,74 @@ def pick_latest_order_by_shipping_name_with_priority(orders: list, target_full: 
 
     # Sort by date only (most recent first)
     cands.sort(key=sort_key, reverse=True)
-    return cands[0][0]
+    return cands[0][0], cands[0][2]
+
+# --------------- Match Quality Assessment ---------------
+def get_match_quality(similarity_score: float) -> str:
+    """Determine match quality based on similarity score"""
+    if similarity_score >= 0.95:
+        return "Perfect match"
+    elif similarity_score >= 0.85:
+        return "Good match"
+    elif similarity_score >= 0.70:
+        return "Likely match"
+    else:
+        return "Weak match"
+
+def adaptive_search_with_thresholds(
+    target_full: str,
+    queries: list,
+    allowed_statuses: list[str] | None,
+    pause_ms: int,
+    order_search_pages: int,
+    per_page_orders: int
+) -> tuple[dict | None, float, str]:
+    """
+    Adaptive search that tries progressively lower thresholds.
+    Returns (order, similarity_score, match_source)
+    match_source can be: "customer", "billing", "shipping", or "none"
+    """
+    # Progressive thresholds from high to low
+    thresholds = [0.95, 0.90, 0.85, 0.80, 0.75, 0.70]
+    
+    for threshold in thresholds:
+        # Priority 1: search customers
+        for cls_want, q in queries:
+            customers = fetch_customers_by_search(q)
+            cand, sim = pick_best_customer_with_priority(customers, target_full, threshold)
+            if cand:
+                full = canonical_name_from_parts(cand.get("first_name", ""), cand.get("last_name", ""))
+                if class_priority(match_class(full, target_full)) >= class_priority(cls_want):
+                    order = fetch_latest_order_for_customer(cand["id"], allowed_statuses=allowed_statuses)
+                    if order:
+                        return order, sim, "customer"
+            time.sleep(pause_ms / 1000.0)
+        
+        # Priority 2: orders search by billing name
+        for cls_want, q in queries:
+            orders = fetch_recent_orders_search(q, pages=order_search_pages, per_page=per_page_orders, allowed_statuses=allowed_statuses)
+            cand, sim = pick_latest_order_by_billing_name_with_priority(orders, target_full, threshold)
+            if cand:
+                b = cand.get("billing") or {}
+                full = canonical_name_from_parts(b.get("first_name", ""), b.get("last_name", ""))
+                mcls = match_class(full, target_full)
+                if class_priority(mcls) >= class_priority(cls_want):
+                    return cand, sim, "billing"
+            time.sleep(pause_ms / 1000.0)
+        
+        # Priority 3: orders search by shipping name
+        for cls_want, q in queries:
+            orders = fetch_recent_orders_search(q, pages=order_search_pages, per_page=per_page_orders, allowed_statuses=allowed_statuses)
+            cand, sim = pick_latest_order_by_shipping_name_with_priority(orders, target_full, threshold)
+            if cand:
+                s = cand.get("shipping") or {}
+                full = canonical_name_from_parts(s.get("first_name", ""), s.get("last_name", ""))
+                mcls = match_class(full, target_full)
+                if class_priority(mcls) >= class_priority(cls_want):
+                    return cand, sim, "shipping"
+            time.sleep(pause_ms / 1000.0)
+    
+    return None, 0.0, "none"
 
 # --------------- FedEx Constants ---------------
 CONSTANT_DATA = {
@@ -418,25 +488,26 @@ with right:
     addr_col = st.selectbox("Address column", columns_list, index=addr_idx)
 
 st.subheader("Matching options")
-c1, c2, c3 = st.columns(3)
+st.info("🤖 **Smart Matching Enabled**: The system will automatically adjust matching thresholds to find the best match (Perfect match → Good match → Likely match)")
+
+c1, c2 = st.columns(2)
 with c1:
-    name_conf_threshold = st.slider("Minimum name similarity", 0.50, 0.99, 0.85, 0.01)
-with c2:
     order_search_pages = st.number_input("Fallback order search pages", min_value=1, max_value=20, value=5, step=1)
-with c3:
+with c2:
     per_page_orders = st.number_input("Orders per page", min_value=20, max_value=100, value=100, step=10)
 
-c4, c5, c6 = st.columns(3)
-with c4:
-    addr_accept_jaccard = st.slider("Accept address if Jaccard ≥", 0.10, 1.0, 0.40, 0.05)
-with c5:
-    addr_accept_ratio = st.slider("Accept address if Sequence ratio ≥", 0.10, 1.0, 0.60, 0.05)
-with c6:
-    pause_ms = st.number_input("Pause between API calls ms", min_value=0, max_value=2000, value=100, step=50)
+with st.expander("⚙️ Advanced Settings"):
+    c4, c5, c6 = st.columns(3)
+    with c4:
+        addr_accept_jaccard = st.slider("Accept address if Jaccard ≥", 0.10, 1.0, 0.40, 0.05)
+    with c5:
+        addr_accept_ratio = st.slider("Accept address if Sequence ratio ≥", 0.10, 1.0, 0.60, 0.05)
+    with c6:
+        pause_ms = st.number_input("Pause between API calls ms", min_value=0, max_value=2000, value=100, step=50)
 
-with st.expander("Order status filter optional"):
-    use_filter = st.checkbox("Filter by allowed statuses", value=False)
-    allowed_statuses = ["processing", "completed", "on-hold", "pending", "failed"]
+with st.expander("Order status filter"):
+    use_filter = st.checkbox("Filter by allowed statuses", value=True)
+    allowed_statuses = ["order-approved", "on-hold", "processing"]
     if not use_filter:
         allowed_statuses = None
 
@@ -490,57 +561,15 @@ if run:
             if f_tok:
                 queries.append(("first", f_tok))
 
-            order = None
-            best_sim = 0.0
-
-            # Priority 1: search customers
-            best_customer = None
-            for cls_want, q in queries:
-                customers = fetch_customers_by_search(q)
-                cand = pick_best_customer_with_priority(customers, target_full, name_conf_threshold)
-                if cand:
-                    full = canonical_name_from_parts(cand.get("first_name", ""), cand.get("last_name", ""))
-                    sim = name_ratio(full, target_full)
-                    if class_priority(match_class(full, target_full)) >= class_priority(cls_want) and sim >= name_conf_threshold:
-                        best_customer = cand
-                        best_sim = sim
-                        break
-                time.sleep(pause_ms / 1000.0)
-
-            if best_customer:
-                order = fetch_latest_order_for_customer(best_customer["id"], allowed_statuses=allowed_statuses)
-
-            # Priority 2: orders search by billing name
-            if order is None:
-                for cls_want, q in queries:
-                    orders = fetch_recent_orders_search(q, pages=order_search_pages, per_page=per_page_orders, allowed_statuses=allowed_statuses)
-                    cand = pick_latest_order_by_billing_name_with_priority(orders, target_full, name_conf_threshold)
-                    if cand:
-                        b = cand.get("billing") or {}
-                        full = canonical_name_from_parts(b.get("first_name", ""), b.get("last_name", ""))
-                        mcls = match_class(full, target_full)
-                        sim = name_ratio(full, target_full)
-                        if class_priority(mcls) >= class_priority(cls_want) and sim >= name_conf_threshold:
-                            order = cand
-                            best_sim = sim
-                            break
-                    time.sleep(pause_ms / 1000.0)
-
-            # Priority 3: orders search by shipping name (in case billing name is different)
-            if order is None:
-                for cls_want, q in queries:
-                    orders = fetch_recent_orders_search(q, pages=order_search_pages, per_page=per_page_orders, allowed_statuses=allowed_statuses)
-                    cand = pick_latest_order_by_shipping_name_with_priority(orders, target_full, name_conf_threshold)
-                    if cand:
-                        s = cand.get("shipping") or {}
-                        full = canonical_name_from_parts(s.get("first_name", ""), s.get("last_name", ""))
-                        mcls = match_class(full, target_full)
-                        sim = name_ratio(full, target_full)
-                        if class_priority(mcls) >= class_priority(cls_want) and sim >= name_conf_threshold:
-                            order = cand
-                            best_sim = sim
-                            break
-                    time.sleep(pause_ms / 1000.0)
+            # Use adaptive search with automatic threshold adjustment
+            order, best_sim, match_source = adaptive_search_with_thresholds(
+                target_full=target_full,
+                queries=queries,
+                allowed_statuses=allowed_statuses,
+                pause_ms=pause_ms,
+                order_search_pages=order_search_pages,
+                per_page_orders=per_page_orders
+            )
 
             if order:
                 billing = order.get("billing") or {}
@@ -598,9 +627,18 @@ if run:
                     result["ShippingMethod"] = None
                     result["ShippingCost"] = None
 
+                # Determine match quality based on similarity score
+                match_quality = get_match_quality(best_sim)
+                
+                # Check address match
                 m = address_match_metrics(addr_for_matching, shipping)
-                ok = address_accept(m, addr_accept_jaccard, addr_accept_ratio)
-                result["MatchNote"] = "OK" if ok else "Address differs"
+                addr_ok = address_accept(m, addr_accept_jaccard, addr_accept_ratio)
+                
+                # Combine match quality with address validation
+                if addr_ok:
+                    result["MatchNote"] = match_quality
+                else:
+                    result["MatchNote"] = f"{match_quality} (Address differs)"
             else:
                 # No match found - preserve input name
                 result["Name"] = name_raw
