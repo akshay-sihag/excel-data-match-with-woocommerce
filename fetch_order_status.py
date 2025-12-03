@@ -137,22 +137,20 @@ if st.button("🚀 Fetch Order Statuses", type="primary"):
     status_text = st.empty()
     
     results = []
-    completed = 0
     
     # Use ThreadPoolExecutor for concurrent requests
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        future_to_order = {executor.submit(fetch_order_status, oid): oid for oid in order_ids}
+        # Submit all tasks and maintain order using map()
+        futures = [executor.submit(fetch_order_status, oid) for oid in order_ids]
         
-        # Process completed tasks
-        for future in concurrent.futures.as_completed(future_to_order):
-            result = future.result()
-            results.append(result)
-            completed += 1
-            
-            # Update progress
-            progress.progress(completed / len(order_ids))
-            status_text.text(f"Processed {completed} of {len(order_ids)} orders")
+        # Process completed tasks in original order
+        for i, future in enumerate(concurrent.futures.as_completed(futures)):
+            # Update progress as tasks complete (but don't append yet)
+            progress.progress((i + 1) / len(order_ids))
+            status_text.text(f"Processed {i + 1} of {len(order_ids)} orders")
+        
+        # Collect results in original order
+        results = [future.result() for future in futures]
     
     progress.progress(1.0)
     status_text.text(f"✅ Completed! Processed {len(order_ids)} orders")
